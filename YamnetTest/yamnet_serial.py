@@ -72,11 +72,10 @@ YAMNET_TO_CATEGORY = {
     "Bark":                 "dog_barking",
     "Growling":             "dog_barking",
 
-    "Microwave oven":       "appliance_beeping",
-    "Washing machine":      "appliance_beeping",
-    "Dishwasher":           "appliance_beeping",
-    "Oven":                 "appliance_beeping",
-    "Printer":              "appliance_beeping",
+    "Music":                "music",
+    "Musical instrument":   "music",
+    "Singing":              "music",
+    "Song":                 "music",
 
     "Silence":              "silence",
     "White noise":          "silence",
