@@ -57,65 +57,107 @@ TFLITE_F32   = Path("tflite_models/yamnet_full.tflite")
 
 # ── UrbanSound8K class → glasses category ────────────────────────────────────
 US8K_TO_GLASSES = {
-    "car_horn":          "horn_beeping",
-    "dog_bark":          "dog_barking",
-    "gun_shot":          "alarm_siren",
-    "siren":             "alarm_siren",
+    "car_horn":          "vehicle",
+    "dog_bark":          "animal",
+    "gun_shot":          "danger",
+    "siren":             "danger",
     "children_playing":  "speech",
-    "air_conditioner":   "unknown_other",
+    "air_conditioner":   "appliance",
     "drilling":          "unknown_other",
-    "engine_idling":     "unknown_other",
+    "engine_idling":     "vehicle",
     "jackhammer":        "unknown_other",
-    "street_music":      "unknown_other",
+    "street_music":      "music",
 }
 
-# ── YAMNet class → glasses category ──────────────────────────────────────────
+# ── YAMNet class → glasses category (keep in sync with yamnet_serial.py) ──────
 YAMNET_TO_GLASSES = {
-    "Speech":                     "speech",
-    "Narration, monologue":       "speech",
-    "Conversation":               "speech",
-    "Shout":                      "speech",
-    "Laughter":                   "speech",
-    "Baby cry, infant cry":       "speech",
-    "Cough":                      "speech",
-    "Sneeze":                     "speech",
-    "Child speech, kid speaking": "speech",
-    "Alarm":                      "alarm_siren",
-    "Siren":                      "alarm_siren",
-    "Fire alarm":                 "alarm_siren",
-    "Smoke detector, smoke alarm":"alarm_siren",
-    "Buzzer":                     "alarm_siren",
-    "Emergency vehicle":          "alarm_siren",
-    "Police car (siren)":         "alarm_siren",
-    "Ambulance (siren)":          "alarm_siren",
-    "Gunshot, gunfire":           "alarm_siren",
-    "Car":                        "horn_beeping",
-    "Horn":                       "horn_beeping",
-    "Beep, bleep":                "horn_beeping",
-    "Bicycle bell":               "horn_beeping",
-    "Car alarm":                  "horn_beeping",
-    "Knock":                      "door_knock_doorbell",
-    "Doorbell":                   "door_knock_doorbell",
-    "Door":                       "door_knock_doorbell",
-    "Slam":                       "door_knock_doorbell",
-    "Telephone":                  "phone_ringing",
-    "Ringtone":                   "phone_ringing",
-    "Telephone bell ringing":     "phone_ringing",
-    "Cell phone":                 "phone_ringing",
-    "Dog":                        "dog_barking",
-    "Bark":                       "dog_barking",
-    "Growling":                   "dog_barking",
-    "Microwave oven":             "appliance_beeping",
-    "Washing machine":            "appliance_beeping",
-    "Dishwasher":                 "appliance_beeping",
-    "Silence":                    "silence",
-    "White noise":                "silence",
+    # DANGER
+    "Alarm":                          "danger",
+    "Siren":                          "danger",
+    "Fire alarm":                     "danger",
+    "Smoke detector, smoke alarm":    "danger",
+    "Emergency vehicle":              "danger",
+    "Police car (siren)":             "danger",
+    "Ambulance (siren)":              "danger",
+    "Civil defense siren":            "danger",
+    "Gunshot, gunfire":               "danger",
+    "Explosion":                      "danger",
+    "Glass":                          "danger",
+    "Scream":                         "danger",
+    "Yell":                           "danger",
+    "Buzzer":                         "danger",
+    "Alarm clock":                    "danger",
+    # SPEECH
+    "Speech":                         "speech",
+    "Narration, monologue":           "speech",
+    "Conversation":                   "speech",
+    "Shout":                          "speech",
+    "Laughter":                       "speech",
+    "Baby cry, infant cry":           "speech",
+    "Cough":                          "speech",
+    "Sneeze":                         "speech",
+    "Child speech, kid speaking":     "speech",
+    "Whispering":                     "speech",
+    "Crying, sobbing":                "speech",
+    "Groan":                          "speech",
+    "Clapping":                       "speech",
+    "Crowd":                          "speech",
+    # VEHICLE
+    "Car":                            "vehicle",
+    "Truck":                          "vehicle",
+    "Motorcycle":                     "vehicle",
+    "Bus":                            "vehicle",
+    "Horn":                           "vehicle",
+    "Car alarm":                      "vehicle",
+    "Beep, bleep":                    "vehicle",
+    "Bicycle bell":                   "vehicle",
+    "Engine":                         "vehicle",
+    "Traffic noise, roadway noise":   "vehicle",
+    "Skateboard":                     "vehicle",
+    "Bicycle":                        "vehicle",
+    "Train":                          "vehicle",
+    "Airplane":                       "vehicle",
+    # DOOR / ENTRY
+    "Knock":                          "door_entry",
+    "Doorbell":                       "door_entry",
+    "Door":                           "door_entry",
+    "Slam":                           "door_entry",
+    "Squeak":                         "door_entry",
+    # PHONE
+    "Telephone":                      "phone",
+    "Ringtone":                       "phone",
+    "Telephone bell ringing":         "phone",
+    "Cell phone":                     "phone",
+    # ANIMAL
+    "Dog":                            "animal",
+    "Bark":                           "animal",
+    "Growling":                       "animal",
+    "Cat":                            "animal",
+    "Meow":                           "animal",
+    "Bird":                           "animal",
+    "Bird vocalization, bird call, bird song": "animal",
+    # APPLIANCE
+    "Microwave oven":                 "appliance",
+    "Washing machine":                "appliance",
+    "Dishwasher":                     "appliance",
+    "Vacuum cleaner":                 "appliance",
+    "Blender":                        "appliance",
+    "Toilet flush":                   "appliance",
+    # MUSIC
+    "Music":                          "music",
+    "Musical instrument":             "music",
+    "Singing":                        "music",
+    "Song":                           "music",
+    "Television":                     "music",
+    "Radio":                          "music",
+    # SILENCE
+    "Silence":                        "silence",
+    "White noise":                    "silence",
 }
 
 GLASSES_CATEGORIES = [
-    "speech", "alarm_siren", "horn_beeping", "door_knock_doorbell",
-    "phone_ringing", "dog_barking", "appliance_beeping",
-    "silence", "unknown_other",
+    "danger", "speech", "vehicle", "door_entry",
+    "phone", "animal", "appliance", "music", "silence", "unknown_other",
 ]
 
 
@@ -252,11 +294,21 @@ def run_test(hub_model, hub_classes, tflite_f32, tflite_i8,
 
     # ── Load dataset ──────────────────────────────────────────────────────────
     print("Initialising UrbanSound8K via soundata...")
-    dataset = soundata.initialize("urbansound8k")
+    data_home = run_test._data_home  # injected by main()
+    dataset = soundata.initialize("urbansound8k",
+                                  data_home=data_home) if data_home else \
+              soundata.initialize("urbansound8k")
 
-    print("Downloading / verifying dataset (skip if already present)...")
-    dataset.download()
-    print("✓ Dataset ready\n")
+    try:
+        print("Downloading / verifying dataset (skip if already present)...")
+        dataset.download()
+        print("✓ Dataset ready\n")
+    except Exception as e:
+        print(f"⚠  Auto-download failed: {e}")
+        print("   UrbanSound8K requires manual download from Zenodo:")
+        print("   https://zenodo.org/record/1203745")
+        print("   Then pass --data-dir /path/to/UrbanSound8K\n")
+        return
 
     clip_ids = dataset.clip_ids
 
@@ -264,7 +316,20 @@ def run_test(hub_model, hub_classes, tflite_f32, tflite_i8,
     relevant_ids = []
     for cid in clip_ids:
         clip = dataset.clip(cid)
-        us8k_label = clip.class_label
+        # Robustly get class label across soundata versions
+        us8k_label = None
+        try:
+            us8k_label = clip.class_label
+        except AttributeError:
+            pass
+        if us8k_label is None:
+            try:
+                tags = clip.tags
+                us8k_label = tags.labels[0] if (tags and tags.labels) else None
+            except Exception:
+                pass
+        if us8k_label is None:
+            continue
         glasses_cat = US8K_TO_GLASSES.get(us8k_label)
         if glasses_cat is None:
             continue
@@ -296,8 +361,12 @@ def run_test(hub_model, hub_classes, tflite_f32, tflite_i8,
     print("─" * 135)
 
     for cid, us8k_label, true_cat in tqdm(relevant_ids, desc="Inferring"):
-        clip     = dataset.clip(cid)
-        waveform = prepare_waveform(clip.audio)
+        clip = dataset.clip(cid)
+        try:
+            audio_data = clip.audio
+        except Exception:
+            audio_data = None
+        waveform = prepare_waveform(audio_data)
         if waveform is None:
             continue
         total += 1
@@ -439,9 +508,13 @@ def main():
                         help="Max clips to test (default: all ~2900 relevant)")
     parser.add_argument("--category", default=None,
                         help="Test one glasses category only "
-                             "(e.g. dog_barking, alarm_siren, horn_beeping)")
+                             "(e.g. animal, danger, vehicle)")
     parser.add_argument("--no-tflite", action="store_true",
                         help="Skip TFLite models, test hub model only")
+    parser.add_argument("--data-dir", default=None,
+                        help="Path to manually downloaded UrbanSound8K folder "
+                             "(soundata data_home). Defaults to ~/mir_datasets/. "
+                             "Manual download: https://zenodo.org/record/1203745")
     args = parser.parse_args()
 
     # Load models
@@ -456,6 +529,7 @@ def main():
         tflite_f32 = f32
         tflite_i8  = i8
 
+    run_test._data_home = args.data_dir
     run_test(hub_model, hub_classes, tflite_f32, tflite_i8,
              limit=args.limit,
              filter_category=args.category)

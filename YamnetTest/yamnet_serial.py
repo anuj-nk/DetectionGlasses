@@ -30,55 +30,102 @@ import serial
 import serial.tools.list_ports
 import tensorflow_hub as hub
 
-# ── YAMNet class → our category mapping ──────────────────────────────────────
+# ── YAMNet class → glasses category ──────────────────────────────────────────
+# 9 categories tuned for a deaf wearer; priority order matters for UX:
+#   danger > speech > vehicle > door_entry > phone > animal > appliance > music > silence
 YAMNET_TO_CATEGORY = {
-    "Speech":               "speech",
-    "Narration, monologue": "speech",
-    "Conversation":         "speech",
-    "Shout":                "speech",
-    "Laughter":             "speech",
-    "Baby cry, infant cry": "speech",
-    "Cough":                "speech",
-    "Sneeze":               "speech",
+    # DANGER — fire / alarm / emergency (most critical to surface immediately)
+    "Alarm":                          "danger",
+    "Siren":                          "danger",
+    "Fire alarm":                     "danger",
+    "Smoke detector, smoke alarm":    "danger",
+    "Emergency vehicle":              "danger",
+    "Police car (siren)":             "danger",
+    "Ambulance (siren)":              "danger",
+    "Civil defense siren":            "danger",
+    "Gunshot, gunfire":               "danger",
+    "Explosion":                      "danger",
+    "Glass":                          "danger",
+    "Scream":                         "danger",
+    "Yell":                           "danger",
+    "Buzzer":                         "danger",
+    "Alarm clock":                    "danger",
 
-    "Alarm":                "alarm_siren",
-    "Siren":                "alarm_siren",
-    "Fire alarm":           "alarm_siren",
-    "Smoke detector, smoke alarm": "alarm_siren",
-    "Buzzer":               "alarm_siren",
-    "Emergency vehicle":    "alarm_siren",
-    "Police car (siren)":   "alarm_siren",
-    "Ambulance (siren)":    "alarm_siren",
-    "Glass":                "alarm_siren",
+    # SPEECH — human voice (awareness of people nearby)
+    "Speech":                         "speech",
+    "Narration, monologue":           "speech",
+    "Conversation":                   "speech",
+    "Shout":                          "speech",
+    "Laughter":                       "speech",
+    "Baby cry, infant cry":           "speech",
+    "Cough":                          "speech",
+    "Sneeze":                         "speech",
+    "Child speech, kid speaking":     "speech",
+    "Whispering":                     "speech",
+    "Crying, sobbing":                "speech",
+    "Groan":                          "speech",
+    "Clapping":                       "speech",
+    "Crowd":                          "speech",
 
-    "Car":                  "horn_beeping",
-    "Car alarm":            "horn_beeping",
-    "Horn":                 "horn_beeping",
-    "Beep, bleep":          "horn_beeping",
-    "Bicycle bell":         "horn_beeping",
-    "Truck":                "horn_beeping",
+    # VEHICLE — traffic & transport
+    "Car":                            "vehicle",
+    "Truck":                          "vehicle",
+    "Motorcycle":                     "vehicle",
+    "Bus":                            "vehicle",
+    "Horn":                           "vehicle",
+    "Car alarm":                      "vehicle",
+    "Beep, bleep":                    "vehicle",
+    "Bicycle bell":                   "vehicle",
+    "Engine":                         "vehicle",
+    "Traffic noise, roadway noise":   "vehicle",
+    "Skateboard":                     "vehicle",
+    "Bicycle":                        "vehicle",
+    "Train":                          "vehicle",
+    "Airplane":                       "vehicle",
 
-    "Knock":                "door_knock_doorbell",
-    "Doorbell":             "door_knock_doorbell",
-    "Door":                 "door_knock_doorbell",
-    "Slam":                 "door_knock_doorbell",
+    # DOOR / ENTRY
+    "Knock":                          "door_entry",
+    "Doorbell":                       "door_entry",
+    "Door":                           "door_entry",
+    "Slam":                           "door_entry",
+    "Squeak":                         "door_entry",
 
-    "Telephone":            "phone_ringing",
-    "Ringtone":             "phone_ringing",
-    "Telephone bell ringing": "phone_ringing",
-    "Cell phone":           "phone_ringing",
+    # PHONE / NOTIFICATION
+    "Telephone":                      "phone",
+    "Ringtone":                       "phone",
+    "Telephone bell ringing":         "phone",
+    "Cell phone":                     "phone",
 
-    "Dog":                  "dog_barking",
-    "Bark":                 "dog_barking",
-    "Growling":             "dog_barking",
+    # ANIMAL
+    "Dog":                            "animal",
+    "Bark":                           "animal",
+    "Growling":                       "animal",
+    "Cat":                            "animal",
+    "Meow":                           "animal",
+    "Bird":                           "animal",
+    "Bird vocalization, bird call, bird song": "animal",
+    "Hiss":                           "animal",
 
-    "Music":                "music",
-    "Musical instrument":   "music",
-    "Singing":              "music",
-    "Song":                 "music",
+    # HOME APPLIANCE
+    "Microwave oven":                 "appliance",
+    "Washing machine":                "appliance",
+    "Dishwasher":                     "appliance",
+    "Vacuum cleaner":                 "appliance",
+    "Blender":                        "appliance",
+    "Toilet flush":                   "appliance",
 
-    "Silence":              "silence",
-    "White noise":          "silence",
+    # MUSIC / MEDIA
+    "Music":                          "music",
+    "Musical instrument":             "music",
+    "Singing":                        "music",
+    "Song":                           "music",
+    "Television":                     "music",
+    "Radio":                          "music",
+    "Jingle":                         "music",
+
+    # SILENCE
+    "Silence":                        "silence",
+    "White noise":                    "silence",
 }
 
 # ── Config ────────────────────────────────────────────────────────────────────
