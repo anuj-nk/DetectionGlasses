@@ -20,10 +20,17 @@ env/
 # Jupyter
 .ipynb_checkpoints/
 
-# Datasets (large, auto-downloaded)
+# Datasets (large, auto-downloaded or generated)
 UrbanSound8K/
 downloads/
 soundata_cache/
+esc50_data/
+clean_dataset/
+ei_dataset/
+ei_dataset.zip
+freesound_downloads/
+noise_glasses_ondevice/prepared_datasets/
+noise_glasses_ondevice/data/
 
 # Generated model files
 tflite_models/
@@ -33,8 +40,10 @@ embeddings_cache*.npz
 embedding_mean.npy
 embedding_std.npy
 
-# Edge Impulse upload staging
+# Edge Impulse upload staging & logs
 ei_upload/
+upload_log.txt
+upload_progress.log
 
 # Scratch / temp files
 stuff.py

@@ -1,18 +1,21 @@
 """
-YAMNet → TFLite Conversion & ESP32-S3 Feasibility Test
-========================================================
-Downloads YAMNet, converts it to a quantized TFLite model,
-measures the size, and reports whether it fits on an ESP32-S3.
+YAMNet Backbone-Only TFLite Conversion for ESP32-S3
+====================================================
+Strips the spectrogram frontend from YAMNet and exports only the
+MobileNet classifier backbone, which takes a log-mel spectrogram
+as input instead of raw audio.
 
-ESP32-S3 limits (typical):
-  Flash: 8–16 MB  (model storage)
-  RAM:   512 KB   (inference arena / activations)
+This produces a model with only ops supported by tflite-micro:
+  CONV_2D, DEPTHWISE_CONV_2D, MEAN, FULLY_CONNECTED, LOGISTIC
 
-Requirements:
-    pip install tensorflow tensorflow-hub numpy
+You compute the log-mel spectrogram on-device (see companion Arduino code).
+
+Input shape:  [1, 96, 64, 1]  — 96 time frames × 64 mel bins, float32
+Output shape: [1, 521]        — class scores (softmax), float32
 
 Usage:
-    python yamnet_esp32_feasibility.py
+    pip install tensorflow tensorflow-hub numpy
+    python yamnet_convert.py
 """
 
 import os
@@ -20,188 +23,250 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_hub as hub
 
-# ── ESP32-S3 hardware budget (conservative) ──────────────────────────────────
-ESP32_FLASH_BYTES = 8 * 1024 * 1024   # 8 MB flash
-ESP32_RAM_BYTES   = 320 * 1024        # 320 KB usable for ML arena
+OUTPUT_DIR  = "tflite_models"
+QUANT_MODEL = os.path.join(OUTPUT_DIR, "yamnet_backbone_int8.tflite")
+FULL_MODEL  = os.path.join(OUTPUT_DIR, "yamnet_backbone_f32.tflite")
 
-OUTPUT_DIR   = "tflite_models"
-FULL_MODEL   = os.path.join(OUTPUT_DIR, "yamnet_full.tflite")
-QUANT_MODEL  = os.path.join(OUTPUT_DIR, "yamnet_int8.tflite")
-SAVED_MODEL  = os.path.join(OUTPUT_DIR, "yamnet_saved_model")
-
-
-def download_yamnet():
-    print("Downloading YAMNet from TF Hub (cached after first run)...")
-    model = hub.load("https://tfhub.dev/google/yamnet/1")
-    print("✓ YAMNet loaded\n")
-    return model
+# YAMNet spectrogram params (must match on-device computation)
+NUM_FRAMES  = 96
+NUM_BINS    = 64
 
 
-def export_saved_model(model):
-    """Wrap the hub model in a tf.function and save it."""
-    print(f"Exporting SavedModel to {SAVED_MODEL}...")
+# ── 1. Load YAMNet and extract the backbone ──────────────────────────────────
 
-    # YAMNet hub model is callable; wrap it so TFLite can trace it
-    @tf.function(input_signature=[tf.TensorSpec(shape=[None], dtype=tf.float32)])
-    def infer(waveform):
-        scores, embeddings, spectrogram = model(waveform)
-        return {"scores": scores, "embeddings": embeddings}
+def get_backbone():
+    """
+    YAMNet's TF Hub model exposes internal layers.
+    We build a new model that takes a pre-computed spectrogram
+    and runs only the MobileNet layers.
+    """
+    print("Loading YAMNet from TF Hub...")
+    yamnet = hub.load("https://tfhub.dev/google/yamnet/1")
 
-    # Save as a concrete function
-    tf.saved_model.save(model, SAVED_MODEL,
-                        signatures={"serving_default": infer})
-    print("✓ SavedModel saved\n")
-    return SAVED_MODEL
+    # The hub model's __call__ runs: waveform → spectrogram → embeddings → scores
+    # We want just: spectrogram → scores
+    # Recreate this by tracing through the model's internal structure.
+
+    @tf.function(input_signature=[
+        tf.TensorSpec(shape=[1, NUM_FRAMES, NUM_BINS, 1], dtype=tf.float32)
+    ])
+    def backbone_infer(spectrogram):
+        # patches shape expected by yamnet internals: [N, 96, 64, 1]
+        # call the internal _apply_weights / embeddings path
+        embeddings = yamnet.call_yamnet(spectrogram)  # may not exist on all versions
+        return embeddings
+
+    return yamnet
 
 
-def convert_full_float(saved_model_path):
-    print("Converting to float32 TFLite...")
-    converter = tf.lite.TFLiteConverter.from_saved_model(saved_model_path)
-    tflite_model = converter.convert()
+def build_backbone_model():
+    """
+    More reliable approach: rebuild the MobileNet backbone in Keras
+    using YAMNet's saved weights. This gives full control over the graph.
+    """
+    print("Loading YAMNet weights...")
+    yamnet = hub.load("https://tfhub.dev/google/yamnet/1")
+
+    # Extract weights by running a dummy inference to populate variables
+    dummy_wav = tf.zeros([16000], dtype=tf.float32)
+    yamnet(dummy_wav)  # populates variables
+
+    # Build a Keras model matching YAMNet's MobileNet backbone
+    inputs = tf.keras.Input(shape=(NUM_FRAMES, NUM_BINS, 1), name="log_mel_spectrogram")
+
+    def _conv_bn_relu(x, filters, kernel, stride, name_prefix):
+        x = tf.keras.layers.Conv2D(
+            filters, kernel, strides=stride, padding="same",
+            use_bias=False, name=f"{name_prefix}_conv")(x)
+        x = tf.keras.layers.BatchNormalization(name=f"{name_prefix}_bn")(x)
+        x = tf.keras.layers.ReLU(6.0, name=f"{name_prefix}_relu")(x)
+        return x
+
+    def _dw_block(x, filters, stride, name_prefix):
+        x = tf.keras.layers.DepthwiseConv2D(
+            3, strides=stride, padding="same",
+            use_bias=False, name=f"{name_prefix}_dw_conv")(x)
+        x = tf.keras.layers.BatchNormalization(name=f"{name_prefix}_dw_bn")(x)
+        x = tf.keras.layers.ReLU(6.0, name=f"{name_prefix}_dw_relu")(x)
+        x = tf.keras.layers.Conv2D(
+            filters, 1, strides=1, padding="same",
+            use_bias=False, name=f"{name_prefix}_pw_conv")(x)
+        x = tf.keras.layers.BatchNormalization(name=f"{name_prefix}_pw_bn")(x)
+        x = tf.keras.layers.ReLU(6.0, name=f"{name_prefix}_pw_relu")(x)
+        return x
+
+    # MobileNet-v1 backbone (matches YAMNet architecture)
+    x = _conv_bn_relu(inputs, 32,  3, 2, "layer1")
+    x = _dw_block(x,           64,  1, "layer2")
+    x = _dw_block(x,          128,  2, "layer3")
+    x = _dw_block(x,          128,  1, "layer4")
+    x = _dw_block(x,          256,  2, "layer5")
+    x = _dw_block(x,          256,  1, "layer6")
+    x = _dw_block(x,          512,  2, "layer7")
+    for i in range(5):
+        x = _dw_block(x,      512,  1, f"layer{8+i}")
+    x = _dw_block(x,         1024,  2, "layer13")
+    x = _dw_block(x,         1024,  1, "layer14")
+
+    # Global average pool → classifier
+    x = tf.keras.layers.GlobalAveragePooling2D(name="global_avg")(x)
+    outputs = tf.keras.layers.Dense(521, activation="sigmoid", name="scores")(x)
+
+    model = tf.keras.Model(inputs, outputs, name="yamnet_backbone")
+    print(f"Backbone params: {model.count_params():,}")
+    return model, yamnet
+
+
+# ── 2. Transfer weights from hub model ───────────────────────────────────────
+
+def transfer_weights(keras_model, yamnet_hub):
+    """
+    Copy weights from the TF Hub YAMNet into the Keras backbone.
+    Falls back to random weights if the hub model structure differs.
+    """
+    try:
+        # Run inference to materialize hub model weights
+        dummy = tf.zeros([16000], dtype=tf.float32)
+        yamnet_hub(dummy)
+
+        hub_vars = {v.name: v.numpy() for v in yamnet_hub.variables}
+        print(f"Hub model has {len(hub_vars)} weight tensors")
+
+        keras_vars = keras_model.variables
+        matched = 0
+        for kv in keras_vars:
+            # Try to find matching hub variable by shape
+            candidates = [
+                (name, val) for name, val in hub_vars.items()
+                if val.shape == kv.shape
+            ]
+            if len(candidates) == 1:
+                kv.assign(candidates[0][1])
+                matched += 1
+
+        print(f"Matched {matched}/{len(keras_vars)} weight tensors")
+        if matched < len(keras_vars) * 0.8:
+            print("⚠  Low match rate — weights may not transfer correctly")
+            print("   Model will use partially random weights")
+        else:
+            print("✓ Weights transferred")
+
+    except Exception as e:
+        print(f"⚠  Weight transfer failed: {e}")
+        print("   Continuing with random weights (model won't classify correctly)")
+
+    return keras_model
+
+
+# ── 3. Convert to TFLite ──────────────────────────────────────────────────────
+
+def convert_float32(model):
+    print("\nConverting backbone to float32 TFLite...")
+    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+    tflite_bytes = converter.convert()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     with open(FULL_MODEL, "wb") as f:
-        f.write(tflite_model)
-    size = os.path.getsize(FULL_MODEL)
-    print(f"✓ Float32 TFLite saved: {size / 1024:.1f} KB\n")
-    return size, tflite_model
+        f.write(tflite_bytes)
+    print(f"✓ Float32: {len(tflite_bytes)/1024:.1f} KB → {FULL_MODEL}")
+    return tflite_bytes
 
 
-def convert_int8_quantized(saved_model_path):
-    """Full-integer (int8) post-training quantization — smallest model."""
-    print("Converting to int8 quantized TFLite...")
+def convert_int8(model):
+    print("\nConverting backbone to int8 TFLite...")
 
-    # Representative dataset: short random waveforms at 16 kHz
     def representative_dataset():
-        for _ in range(50):
-            yield [np.random.uniform(-1, 1, (16000,)).astype(np.float32)]
+        for _ in range(100):
+            # Random log-mel spectrograms in realistic range [-10, 2]
+            spec = np.random.uniform(-10, 2, (1, NUM_FRAMES, NUM_BINS, 1)).astype(np.float32)
+            yield [spec]
 
-    converter = tf.lite.TFLiteConverter.from_saved_model(saved_model_path)
+    converter = tf.lite.TFLiteConverter.from_keras_model(model)
     converter.optimizations = [tf.lite.Optimize.DEFAULT]
     converter.representative_dataset = representative_dataset
     converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-    converter.inference_input_type  = tf.int8
-    converter.inference_output_type = tf.int8
+    converter.inference_input_type  = tf.float32  # keep float I/O for easier on-device use
+    converter.inference_output_type = tf.float32
 
-    try:
-        tflite_model = converter.convert()
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        with open(QUANT_MODEL, "wb") as f:
-            f.write(tflite_model)
-        size = os.path.getsize(QUANT_MODEL)
-        print(f"✓ Int8 TFLite saved: {size / 1024:.1f} KB\n")
-        return size, tflite_model
-    except Exception as e:
-        print(f"⚠  Int8 quantization failed: {e}")
-        print("   (This is common if the hub model doesn't expose concrete signatures)")
-        return None, None
+    tflite_bytes = converter.convert()
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    with open(QUANT_MODEL, "wb") as f:
+        f.write(tflite_bytes)
+    print(f"✓ Int8: {len(tflite_bytes)/1024:.1f} KB → {QUANT_MODEL}")
+    return tflite_bytes
 
 
-def estimate_ram_usage(tflite_bytes):
-    """
-    Rough heuristic: TFLite Micro arena needs ~activations.
-    For MobileNet-class models activations ≈ 10–20% of model size.
-    YAMNet is MobileNet-based, so we use 15% as a rough estimate.
-    """
-    return int(len(tflite_bytes) * 0.15)
+# ── 4. Verify ops ─────────────────────────────────────────────────────────────
 
+MICRO_SAFE_OPS = {
+    "CONV_2D", "DEPTHWISE_CONV_2D", "FULLY_CONNECTED",
+    "MEAN", "RESHAPE", "SOFTMAX", "LOGISTIC",
+    "ADD", "MUL", "PAD", "QUANTIZE", "DEQUANTIZE"
+}
 
-def run_smoke_test(tflite_bytes, model_label):
-    """Run a single inference with random audio to confirm the model works."""
-    print(f"Running smoke-test inference on {model_label}...")
+def verify_ops(tflite_bytes, label):
+    print(f"\nOp audit — {label}:")
     interpreter = tf.lite.Interpreter(model_content=tflite_bytes)
-
-    input_details = interpreter.get_input_details()
-
-    # The SavedModel export gives the input a dynamic/unknown shape.
-    # Resize it to a concrete 3-second waveform before allocating tensors.
-    NUM_SAMPLES = 16000 * 3  # 3 seconds at 16 kHz
-    interpreter.resize_tensor_input(input_details[0]["index"], [NUM_SAMPLES])
     interpreter.allocate_tensors()
-
-    # Re-fetch details after resize
-    input_details  = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
-
-    dtype = np.float32 if input_details[0]["dtype"] == np.float32 else np.int8
-    waveform = np.random.uniform(-1, 1, (NUM_SAMPLES,)).astype(dtype)
-
-    interpreter.set_tensor(input_details[0]["index"], waveform)
-    interpreter.invoke()
-
-    scores = interpreter.get_tensor(output_details[0]["index"])
-    print(f"  Input shape : {input_details[0]['shape']}")
-    print(f"  Output shape: {scores.shape}  dtype: {scores.dtype}")
-    print(f"✓ Smoke test passed\n")
+    ops = {op["op_name"] for op in interpreter._get_ops_details()}
+    
+    bad = ops - MICRO_SAFE_OPS
+    print(f"  All ops:  {sorted(ops)}")
+    if bad:
+        print(f"  ⚠  Unsupported on tflite-micro: {sorted(bad)}")
+    else:
+        print(f"  ✓ All ops are tflite-micro compatible!")
+    return len(bad) == 0
 
 
-def feasibility_report(float_size, quant_size):
-    print("=" * 60)
-    print("  ESP32-S3 Feasibility Report")
-    print("=" * 60)
+# ── 5. Smoke test ─────────────────────────────────────────────────────────────
 
-    rows = []
-    if float_size:
-        rows.append(("YAMNet float32", float_size))
-    if quant_size:
-        rows.append(("YAMNet int8",    quant_size))
+def smoke_test(tflite_bytes, label):
+    print(f"\nSmoke test — {label}:")
+    interp = tf.lite.Interpreter(model_content=tflite_bytes)
+    interp.allocate_tensors()
+    inp = interp.get_input_details()[0]
+    out = interp.get_output_details()[0]
 
-    for label, size in rows:
-        fits_flash = size <= ESP32_FLASH_BYTES
-        flash_pct  = size / ESP32_FLASH_BYTES * 100
-        print(f"\n  {label}")
-        print(f"    Model size : {size/1024:>8.1f} KB  ({flash_pct:.0f}% of 8 MB flash)")
-        print(f"    Flash fit  : {'✓ YES' if fits_flash else '✗ NO — too large'}")
+    dummy = np.random.uniform(-10, 2, inp["shape"]).astype(np.float32)
+    interp.set_tensor(inp["index"], dummy)
+    interp.invoke()
+    scores = interp.get_tensor(out["index"])[0]
 
-    print("""
-  ┌─ Conclusions ────────────────────────────────────────┐
-  │                                                       │
-  │  Full YAMNet (~3.7 MB float32) FITS in 8 MB flash.   │
-  │  Int8 version (~1 MB) fits with room to spare.        │
-  │                                                       │
-  │  RAM is the tighter constraint:                       │
-  │   • ESP32-S3 has 512 KB total, ~320 KB usable for ML  │
-  │   • YAMNet activations ~300–400 KB → very tight       │
-  │   • Recommendation: use int8 + PSRAM (8 MB PSRAM      │
-  │     versions of the ESP32-S3 module solve this)        │
-  │                                                       │
-  │  Recommended board: ESP32-S3-DevKitC-1 with PSRAM     │
-  │  Framework: ESP-IDF + TFLite Micro (or Arduino + tfl)  │
-  └───────────────────────────────────────────────────────┘
-""")
+    top5_idx = np.argsort(scores)[-5:][::-1]
+    print(f"  Input:  {inp['shape']} {inp['dtype']}")
+    print(f"  Output: {out['shape']} {out['dtype']}")
+    print(f"  Top-5 class indices: {top5_idx}  scores: {scores[top5_idx].round(3)}")
+    print(f"✓ Smoke test passed")
 
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    backbone, yamnet_hub = build_backbone_model()
+    backbone = transfer_weights(backbone, yamnet_hub)
+    backbone.summary(line_length=80)
 
-    model = download_yamnet()
+    f32_bytes  = convert_float32(backbone)
+    int8_bytes = convert_int8(backbone)
 
-    # Try direct TFLite conversion from the hub model
-    print("Attempting direct TFLite conversion from TF Hub model...")
-    try:
-        converter = tf.lite.TFLiteConverter.from_concrete_functions(
-            [model.signatures["serving_default"]])
-        float_bytes = converter.convert()
-        float_size  = len(float_bytes)
-        with open(FULL_MODEL, "wb") as f:
-            f.write(float_bytes)
-        print(f"✓ Float32 TFLite: {float_size/1024:.1f} KB\n")
-        run_smoke_test(float_bytes, "float32 model")
-    except Exception as e:
-        print(f"Direct conversion note: {e}")
-        print("Trying SavedModel export path...\n")
-        saved_path = export_saved_model(model)
-        float_size, float_bytes = convert_full_float(saved_path)
-        if float_bytes:
-            run_smoke_test(float_bytes, "float32 model")
+    f32_ok  = verify_ops(f32_bytes,  "float32")
+    int8_ok = verify_ops(int8_bytes, "int8")
 
-    # Int8 quantization
-    quant_size = None
-    try:
-        saved_path = SAVED_MODEL if os.path.exists(SAVED_MODEL) else export_saved_model(model)
-        quant_size, quant_bytes = convert_int8_quantized(saved_path)
-        if quant_bytes:
-            run_smoke_test(quant_bytes, "int8 model")
-    except Exception as e:
-        print(f"Quantization note: {e}\n")
+    smoke_test(f32_bytes,  "float32")
+    smoke_test(int8_bytes, "int8")
 
-    feasibility_report(float_size, quant_size)
+    print("\n" + "="*60)
+    print("  Summary")
+    print("="*60)
+    print(f"  Float32 : {len(f32_bytes)/1024:>7.1f} KB  micro-safe: {'✓' if f32_ok else '✗'}")
+    print(f"  Int8    : {len(int8_bytes)/1024:>7.1f} KB  micro-safe: {'✓' if int8_ok else '✗'}")
+    print("""
+  On-device you need to compute log-mel spectrogram before inference:
+    1. Capture 16000 samples @ 16kHz (1 second)
+    2. Apply pre-emphasis filter
+    3. Frame into 25ms windows with 10ms hop → 96 frames
+    4. Apply Hann window
+    5. FFT → power spectrum → 64 mel filterbank bins
+    6. Log compression: log(max(spec, 1e-6))
+    7. Feed [1, 96, 64, 1] float32 tensor to model
+  """)
