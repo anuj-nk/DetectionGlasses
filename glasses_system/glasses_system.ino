@@ -3,37 +3,34 @@
  * Noise-detection glasses for deaf / hard-of-hearing users.
  *
  * FOUR PDM mics, two stereo pairs:
- *   GPIO2 back line  -> back-left + back-right   (correct wiring)
- *   GPIO6 front line -> front pair, L/R SWAPPED in hardware (fixed in SW below)
+ *   GPIO2 back line  -> back-left + back-right
+ *   GPIO6 front line -> front pair (reads mirrored vs back; handled in SW)
  *   GPIO1 shared clock, GPIO4 shared THSEL
  *
- * What it does:
- *   - Edge Impulse model classifies the sound: alert / music / speech / vehicle
- *   - 4 mics give direction: which of LEFT / MIDDLE / RIGHT, and FRONT vs BACK
- *   - 3 NeoPixels (left, middle, right): the lit pixel = horizontal direction,
- *     the COLOR    = the sound class from the model
- *   - Haptic motor buzzes when the sound is coming from BEHIND
+ * Behavior:
+ *   - 4 mics give direction: LEFT / MIDDLE / RIGHT, plus FRONT vs BACK
+ *   - 3 NeoPixels: the lit pixel = horizontal direction
+ *   - LED color   = sound class from the model (white if model is unsure)
+ *   - LED brightness scales with loudness
+ *   - Haptic motor buzzes for sounds coming from BEHIND
  *
- * Mics are T5838 with AAD, but we stream normal PDM (clock always present),
- * so AAD is not used here and needs no setup.
- *
- * NeoPixels do not need to be physically connected for this to run - the
- * NeoPixel calls just toggle a GPIO and do nothing harmful if unconnected.
+ * Robustness model: the direction display fires for any loud directional
+ * sound (gated by SOUND_THRESHOLD), independent of the classifier. The class
+ * only sets the color. This keeps the reliable part (direction) working even
+ * when the model is unsure.
  * ==========================================================================*/
 
 #define EIDSP_QUANTIZE_FILTERBANK   0
 
 /* ====================== USER CONFIG ====================== */
 
-/* PDM pins */
-#define PDM_CLK_PIN     1    // XIAO D0  = GPIO1
-#define PDM_DATA_BACK   2    // XIAO D1  = GPIO2
-#define PDM_DATA_FRONT  6    // XIAO D5  = GPIO6
+/* PDM pins (XIAO silkscreen Dx != GPIO) */
+#define PDM_CLK_PIN     1    // D0 = GPIO1
+#define PDM_DATA_BACK   2    // D1 = GPIO2
+#define PDM_DATA_FRONT  6    // D5 = GPIO6
 
-/* Raw 4-sample frame = [din0_s0, din0_s1, din1_s0, din1_s1]
- * din0 = back line, din1 = front line.
- * Front pair is swapped in HW: slot1 = front LEFT, slot0 = front RIGHT.
- * Verify with mic_test.ino and adjust if your bars say otherwise. */
+/* Raw 4-sample frame = [back_s0, back_s1, front_s0, front_s1].
+ * Verified with mic_test.ino. */
 #define CH_BACK_L    0
 #define CH_BACK_R    1
 #define CH_FRONT_R   2
@@ -42,33 +39,41 @@
 /* Outputs */
 #define HAPTIC_PIN        5
 #define HAPTIC_ACTIVE_HIGH true
-#define HAPTIC_MIN_INTENSITY 70     // weakest motor PWM when rear sound just passes threshold
+#define HAPTIC_MIN_INTENSITY 70     // weakest motor PWM at threshold
 #define HAPTIC_MAX_INTENSITY 255    // strongest motor PWM for loud rear sounds
-#define HAPTIC_LOUDNESS_MAX 3500    // rear p2p level that maps to max vibration; tune after testing
+#define HAPTIC_LOUDNESS_MAX 2600    // rear p2p that maps to max vibration; tune
 
-#define NEOPIXEL_PIN       43     // LED_DATA = GPIO43 (D6) per schematic
-#define NEOPIXEL_COUNT     3      // left, middle, right
-#define LED_LEFT_IDX       0      // which pixel is physically left
+#define NEOPIXEL_PIN       43       // LED_DATA = GPIO43 (D6)
+#define NEOPIXEL_COUNT     3        // left, middle, right
+#define LED_LEFT_IDX       0        // which pixel is physically left
 #define LED_MIDDLE_IDX     1
 #define LED_RIGHT_IDX      2
-#define NEOPIXEL_BRIGHTNESS 90      // max LED brightness when sound is loud
-#define NEOPIXEL_MIN_BRIGHTNESS 8   // dimmest visible brightness when sound just passes threshold
-#define LOUDNESS_MAX       3500     // p2p level that maps to max LED brightness; tune after testing
-#define BRIGHTNESS_SMOOTH  0.35f    // 0=no changes, 1=instant brightness changes
+#define NEOPIXEL_BRIGHTNESS 90      // max LED brightness when loud
+#define NEOPIXEL_MIN_BRIGHTNESS 8   // dimmest visible brightness at threshold
+#define LOUDNESS_MAX       2600     // p2p that maps to max LED brightness; tune
 
 /* Audio / EI */
-#define AUDIO_GAIN        8       // applied to the mono stream feeding the model
+#define AUDIO_GAIN        8         // gain on the mono stream feeding the model
 
 /* Direction tuning */
-#define SOUND_THRESHOLD   400     // total p2p to count as a real sound
-#define LR_THRESHOLD      0.10f   // |left-right| bias to pick a side vs middle
-#define FB_THRESHOLD      0.12f   // front vs back bias to trigger back-buzz
+#define SOUND_THRESHOLD   1300      // total p2p to count as a real sound (gates room ambient)
+#define LR_THRESHOLD      0.10f     // left/right bias to pick a side vs middle
+#define FB_THRESHOLD      0.12f     // front/back bias to trigger back-buzz
 
-/* Classification confidence to act on */
-#define CONF_THRESHOLD    0.60f
+/* Display behavior */
+#define CONF_THRESHOLD    0.60f     // class confidence to trust the color (else white)
+#define HOLD_MS           700       // keep a direction lit this long after sound drops
 
 /* Diagnostics */
 #define AUDIO_DIAG        1
+
+/* Calibrations */
+/* Per-channel calibration: corrects fixed sensitivity imbalance so a centered
+ * sound reads equal on all four. Right side (bL, fR) reads ~20-25% low, boost it. */
+#define CAL_BACK_L    1.28f   // right-back  (was reading low)
+#define CAL_BACK_R    1.00f
+#define CAL_FRONT_L   1.00f
+#define CAL_FRONT_R   1.30f   // right-front (your weak one)
 
 /* ====================== INCLUDES ====================== */
 #include <Yamnet-515-Group_inferencing.h>
@@ -78,7 +83,7 @@
 #include <Adafruit_NeoPixel.h>
 
 I2SClass I2S;
-Adafruit_NeoPixel strip(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRBW + NEO_KHZ800);
+Adafruit_NeoPixel strip(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
 /* Class colors, index order: alert, music, speech, vehicle */
 struct RGB { uint8_t r, g, b; };
@@ -101,7 +106,6 @@ static int   print_results = -(EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW);
 static bool  debug_nn = false;
 
 /* ====================== SHARED DIRECTION STATE ====================== */
-/* Written by capture task, read by loop. Plain volatile is fine for amplitudes. */
 static volatile float g_pp_backL  = 0;
 static volatile float g_pp_backR  = 0;
 static volatile float g_pp_frontL = 0;
@@ -112,7 +116,7 @@ static int   lastTop  = -1;
 static float lastTopV = 0;
 
 /* ====================== HAPTIC (non-blocking) ====================== */
-static const uint16_t PAT_BACK[] = {200, 90, 200, 600};   // back-alert buzz
+static const uint16_t PAT_BACK[] = {200, 90, 200, 600};
 static const uint16_t *hapPattern = nullptr;
 static uint8_t hapLen = 0, hapStep = 0, hapIntensity = 0;
 static uint32_t hapStepStart = 0; static bool hapOn = false;
@@ -123,40 +127,29 @@ void hapticStop(){ hapPattern=nullptr;hapOn=false;hapticWrite(0);}
 void hapticUpdate(){ if(!hapPattern)return; if(millis()-hapStepStart<hapPattern[hapStep])return; if(++hapStep>=hapLen){hapticStop();return;} hapStepStart=millis(); hapOn=!hapOn; hapticWrite(hapOn?hapIntensity:0); }
 
 /* ====================== LED ====================== */
-static uint8_t currentLedBrightness = NEOPIXEL_MIN_BRIGHTNESS;
-
 uint8_t brightnessFromLoudness(float loudness) {
-    if (loudness <= SOUND_THRESHOLD) return 0;
-
-    // Clamp the measured loudness into the useful range.
+    if (loudness <= SOUND_THRESHOLD) return NEOPIXEL_MIN_BRIGHTNESS;
     if (loudness > LOUDNESS_MAX) loudness = LOUDNESS_MAX;
-
     float t = (loudness - SOUND_THRESHOLD) / (float)(LOUDNESS_MAX - SOUND_THRESHOLD);
     if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
-
-    return (uint8_t)(NEOPIXEL_MIN_BRIGHTNESS +
-                     t * (NEOPIXEL_BRIGHTNESS - NEOPIXEL_MIN_BRIGHTNESS));
+    return (uint8_t)(NEOPIXEL_MIN_BRIGHTNESS + t * (NEOPIXEL_BRIGHTNESS - NEOPIXEL_MIN_BRIGHTNESS));
 }
 
 uint8_t hapticIntensityFromLoudness(float loudness) {
     if (loudness <= SOUND_THRESHOLD) return 0;
-
     if (loudness > HAPTIC_LOUDNESS_MAX) loudness = HAPTIC_LOUDNESS_MAX;
-
     float t = (loudness - SOUND_THRESHOLD) / (float)(HAPTIC_LOUDNESS_MAX - SOUND_THRESHOLD);
     if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
-
-    return (uint8_t)(HAPTIC_MIN_INTENSITY +
-                     t * (HAPTIC_MAX_INTENSITY - HAPTIC_MIN_INTENSITY));
+    return (uint8_t)(HAPTIC_MIN_INTENSITY + t * (HAPTIC_MAX_INTENSITY - HAPTIC_MIN_INTENSITY));
 }
 
 void ledShow(int pixel, RGB c, uint8_t brightness) {
     strip.clear();
     strip.setBrightness(brightness);
     if (pixel >= 0 && pixel < NEOPIXEL_COUNT)
-        strip.setPixelColor(pixel, strip.Color(c.r, c.g, c.b, 0));
+        strip.setPixelColor(pixel, strip.Color(c.r, c.g, c.b));
     strip.show();
 }
 void ledClear(){ strip.clear(); strip.show(); }
@@ -172,7 +165,7 @@ static void audio_inference_callback(int16_t s) {
 }
 
 static void capture_samples(void *arg) {
-    const int RF = 512;                         // frames per read
+    const int RF = 512;
     const int CH = 4;
     static int16_t buf[512 * 4];
     static float dc_est = 0.0f;
@@ -191,13 +184,12 @@ static void capture_samples(void *arg) {
             int16_t fL = buf[f*CH + CH_FRONT_L];
             int16_t fR = buf[f*CH + CH_FRONT_R];
 
-            // direction min/max (use the corrected channel slots)
             if (bL<mn[0]) mn[0]=bL; if (bL>mx[0]) mx[0]=bL;
             if (bR<mn[1]) mn[1]=bR; if (bR>mx[1]) mx[1]=bR;
             if (fL<mn[2]) mn[2]=fL; if (fL>mx[2]) mx[2]=fL;
             if (fR<mn[3]) mn[3]=fR; if (fR>mx[3]) mx[3]=fR;
 
-            // mono stream for the model: average the two BACK mics (known good).
+            // mono stream for the model: average the two BACK mics
             float x = ((int32_t)bL + (int32_t)bR) * 0.5f;
             dc_est += 0.0005f * (x - dc_est);
             float y = (x - dc_est) * AUDIO_GAIN;
@@ -206,10 +198,15 @@ static void capture_samples(void *arg) {
             audio_inference_callback((int16_t)y);
         }
 
-        g_pp_backL  = mx[0] - mn[0];
-        g_pp_backR  = mx[1] - mn[1];
-        g_pp_frontL = mx[2] - mn[2];
-        g_pp_frontR = mx[3] - mn[3];
+        // Peak-hold with slow decay so brief sounds (claps) survive long
+        // enough for the slower direction read in loop() to catch them.
+        const float DECAY = 0.90f;
+        float pbL = mx[0]-mn[0], pbR = mx[1]-mn[1];
+        float pfL = mx[2]-mn[2], pfR = mx[3]-mn[3];
+        g_pp_backL  = (pbL > g_pp_backL  * DECAY) ? pbL : g_pp_backL  * DECAY;
+        g_pp_backR  = (pbR > g_pp_backR  * DECAY) ? pbR : g_pp_backR  * DECAY;
+        g_pp_frontL = (pfL > g_pp_frontL * DECAY) ? pfL : g_pp_frontL * DECAY;
+        g_pp_frontR = (pfR > g_pp_frontR * DECAY) ? pfR : g_pp_frontR * DECAY;
     }
     vTaskDelete(NULL);
 }
@@ -245,31 +242,26 @@ static int mic_get_data(size_t off, size_t len, float *out) {
 
 /* ====================== DIRECTION ====================== */
 // returns horizontal pixel (LED_LEFT/MIDDLE/RIGHT idx) or -1 if quiet,
-// sets isBack, and outputs loudness from the chosen direction.
-int horizontalPixel(bool *isBack, float *dirLoudness,
-                    float *outLR, float *outFB, float *outFront,
-                    float *outBack, float *outTotal) {
-    float bL=g_pp_backL, bR=g_pp_backR, fL=g_pp_frontL, fR=g_pp_frontR;
+// sets isBack, and reports loudness from the chosen direction.
+int horizontalPixel(bool *isBack, float *dirLoudness, float *outBack) {
+    float bL = g_pp_backL  * CAL_BACK_L;
+    float bR = g_pp_backR  * CAL_BACK_R;
+    float fL = g_pp_frontL * CAL_FRONT_L;
+    float fR = g_pp_frontR * CAL_FRONT_R;
 
-    // On this board the front pair reads MIRRORED vs the back pair (bL tracks
-    // fR, bR tracks fL). So the channels on the same physical side are
-    // (bL,fR) and (bR,fL). Pairing them this way is what separates L from R.
+    // Front pair reads mirrored vs back (bL tracks fR, bR tracks fL), so the
+    // channels on the same physical side are (bL,fR) and (bR,fL).
     float sideA = bL + fR;     // one physical side
     float sideB = bR + fL;     // the other side
     float front = fL + fR;
     float back  = bL + bR;
     float total = sideA + sideB;
 
-    float lr = 0.0f;
-    float fb = 0.0f;
-    if (total > 0.0f) lr = (sideA - sideB) / total;                 // + = sideA, - = sideB
-    if ((front + back) > 0.0f) fb = (front - back) / (front + back + 1.0f);  // + = front, - = back
+    float lr = 0.0f, fb = 0.0f;
+    if (total > 0.0f) lr = (sideA - sideB) / total;
+    if ((front + back) > 0.0f) fb = (front - back) / (front + back + 1.0f);
 
-    if (outLR) *outLR = lr;
-    if (outFB) *outFB = fb;
-    if (outFront) *outFront = front;
     if (outBack) *outBack = back;
-    if (outTotal) *outTotal = total;
 
     *isBack = false;
     *dirLoudness = total;
@@ -280,7 +272,7 @@ int horizontalPixel(bool *isBack, float *dirLoudness,
     // If left/right come out swapped during testing, swap these two lines.
     if (lr >  LR_THRESHOLD) { *dirLoudness = sideA; return LED_RIGHT_IDX; }
     if (lr < -LR_THRESHOLD) { *dirLoudness = sideB; return LED_LEFT_IDX; }
-    *dirLoudness = total * 0.5f;   // middle means sound is roughly balanced across both sides
+    *dirLoudness = total * 0.5f;
     return LED_MIDDLE_IDX;
 }
 
@@ -335,31 +327,38 @@ void loop() {
         lastTop = top; lastTopV = topv;
     }
 
-    // Refresh DIRECTION + LED every slice (~0.5s) so it tracks you moving.
+    // Direction every slice (~0.5s).
     bool isBack = false;
-    float dirLoudness = 0;
-    float lr = 0, fb = 0, front = 0, back = 0, total = 0;
-    int pixel = horizontalPixel(&isBack, &dirLoudness, &lr, &fb, &front, &back, &total);
+    float dirLoudness = 0, backLoud = 0;
+    int pixel = horizontalPixel(&isBack, &dirLoudness, &backLoud);
 
-    // LEDs still require the model to confidently classify the sound.
-    if (pixel == -1 || lastTop < 0 || lastTopV < CONF_THRESHOLD) {
-        ledClear();
-    } else {
-        uint8_t targetBrightness = brightnessFromLoudness(dirLoudness);
-        currentLedBrightness = (uint8_t)(currentLedBrightness +
-            BRIGHTNESS_SMOOTH * ((float)targetBrightness - currentLedBrightness));
+    // ---- Robust direction display with hold ----
+    // Light the direction pixel for ANY loud directional sound, even if the
+    // model is unsure. Color = class guess, white if not confident.
+    static uint32_t lastSoundMs = 0;
+    static int      heldPixel   = -1;
+    static RGB      heldColor   = {255,255,255};
+    static uint8_t  heldBright  = 0;
 
-        ledShow(pixel, CLASS_COLOR[lastTop], currentLedBrightness); // position = direction, color = class, brightness = loudness
+    if (pixel != -1) {                       // a sound passed SOUND_THRESHOLD
+        heldPixel   = pixel;
+        lastSoundMs = millis();
+        heldColor   = (lastTop >= 0 && lastTopV >= CONF_THRESHOLD)
+                      ? CLASS_COLOR[lastTop] : (RGB){255,255,255};
+        heldBright  = brightnessFromLoudness(dirLoudness);
     }
 
-    // HAPTIC: vibrate for ANY sound from behind, regardless of class confidence.
-    // Strength is based on rear loudness/amplitude.
-    uint8_t hapticIntensity = 0;
+    if (heldPixel != -1 && (millis() - lastSoundMs) < HOLD_MS) {
+        ledShow(heldPixel, heldColor, heldBright);
+    } else {
+        heldPixel = -1;
+        ledClear();
+    }
+
+    // ---- Haptic: buzz for loud sounds from behind, strength by loudness ----
     if (pixel != -1 && isBack) {
-        hapticIntensity = hapticIntensityFromLoudness(back);
-        if (hapticIntensity > 0 && hapPattern == nullptr) {
-            hapticStart(PAT_BACK, 4, hapticIntensity);
-        }
+        uint8_t hi = hapticIntensityFromLoudness(backLoud);
+        if (hi > 0 && hapPattern == nullptr) hapticStart(PAT_BACK, 4, hi);
     } else {
         hapticStop();
     }
